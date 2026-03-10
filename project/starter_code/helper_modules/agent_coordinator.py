@@ -25,6 +25,8 @@ Key Features:
 
 import os
 import logging
+import re
+import ast
 from typing import Dict, List, Any, Tuple, Optional
 from pathlib import Path
 
@@ -109,10 +111,11 @@ class AgentCoordinator:
         Get the base URL from environment: os.getenv("OPENAI_API_BASE", "https://openai.vocareum.com/v1")
         Pass it as api_base parameter to both OpenAI() and OpenAIEmbedding() constructors.
         """
-        # YOUR CODE HERE
-        pass
-    
-    
+        api_base = os.getenv("OPENAI_API_BASE", "https://openai.vocareum.com/v1")
+        self.llm = OpenAI(model="gpt-3.5-turbo", temperature=0, api_base=api_base)
+        Settings.llm = self.llm
+        Settings.embed_model = OpenAIEmbedding(model="text-embedding-ada-002", api_base=api_base)
+
     def setup(self, document_tools: List = None, function_tools: List = None):
         """
         Setup all components using the modular architecture.
@@ -158,9 +161,15 @@ class AgentCoordinator:
         3. Create instances and call their build methods
         4. Store results in self.document_tools and self.function_tools
         """
-        # YOUR CODE HERE
-        pass
-    
+        from helper_modules.document_tools import DocumentToolsManager
+        from helper_modules.function_tools import FunctionToolsManager
+
+        doc_manager = DocumentToolsManager(companies=self.companies, verbose=self.verbose)
+        self.document_tools = doc_manager.build_document_tools()
+
+        func_manager = FunctionToolsManager(verbose=self.verbose)
+        self.function_tools = func_manager.create_function_tools()
+
     def _check_and_apply_pii_protection(self, tool_name: str, result: str) -> str:
         """Check if database results need PII protection and apply it automatically
         
@@ -183,13 +192,32 @@ class AgentCoordinator:
         if "COLUMNS:" not in result:
             return result
         
-        # TODO: Extract column names from result
-        # Detect PII fields using _detect_pii_fields()
-        # If PII detected, find and use the pii_protection_tool
-        # Apply protection and return masked result
-        # YOUR CODE HERE
-        
-        return result  # Placeholder
+        # Extract column names from result
+        columns = []
+        for line in result.splitlines():
+            if line.strip().startswith("COLUMNS:"):
+                col_text = line.split("COLUMNS:", 1)[1].strip()
+                try:
+                    parsed = ast.literal_eval(col_text)
+                    if isinstance(parsed, list):
+                        columns = parsed
+                except Exception:
+                    columns = [c.strip() for c in col_text.strip('[]').split(',') if c.strip()]
+                break
+
+        pii_fields = self._detect_pii_fields(columns)
+        if not pii_fields:
+            return result
+
+        # Find PII protection tool and apply masking
+        for tool in self.function_tools:
+            if hasattr(tool, 'metadata') and tool.metadata.name == 'pii_protection_tool':
+                try:
+                    return tool.call(result, str(columns))
+                except Exception:
+                    return result
+
+        return result  # PII tool not available
     
     def _detect_pii_fields(self, field_names: list) -> set:
         """Detect which fields contain PII based on field names
@@ -202,15 +230,108 @@ class AgentCoordinator:
         Returns:
             Set of field names that contain PII
         """
-        # TODO: Define PII field patterns (email, phone, names, address, ssn, etc.)
-        # Check each field name against patterns
-        # Return set of detected PII field names
-        # YOUR CODE HERE
-        
-        return set()  # Placeholder
+        # Define PII field patterns
+        patterns = [
+            'name', 'first', 'last', 'email', 'phone', 'address',
+            'ssn', 'social', 'dob', 'birth', 'account',
+        ]
+        pii_fields = set()
+        for field in field_names:
+            field_lower = str(field).lower()
+            if any(p in field_lower for p in patterns):
+                pii_fields.add(field)
+        return pii_fields
     
 
-    def _route_query(self, query: str) -> List[Tuple[str, str, Any]]:
+        def _simple_routing(self, query: str) -> List[Any]:
+        """Rule-based routing fallback when LLM routing is unavailable"""
+        query_lower = query.lower()
+        selected_tools = []
+
+        def add_tool_by_name(name: str, tools: List):
+            for tool in tools:
+                if hasattr(tool, 'metadata') and tool.metadata.name == name:
+                    if tool not in selected_tools:
+                        selected_tools.append(tool)
+
+        # Document tools by company
+        if 'apple' in query_lower or 'aapl' in query_lower:
+            add_tool_by_name('AAPL_10k_filing_tool', self.document_tools)
+        if 'google' in query_lower or 'googl' in query_lower or 'alphabet' in query_lower:
+            add_tool_by_name('GOOGL_10k_filing_tool', self.document_tools)
+        if 'tesla' in query_lower or 'tsla' in query_lower:
+            add_tool_by_name('TSLA_10k_filing_tool', self.document_tools)
+
+        # Market data queries
+        if any(k in query_lower for k in ['price', 'stock', 'market', 'share']):
+            add_tool_by_name('finance_market_search_tool', self.function_tools)
+
+        # Database queries
+        if any(k in query_lower for k in ['customer', 'portfolio', 'holding', 'database', 'account']):
+            add_tool_by_name('database_query_tool', self.function_tools)
+
+        # If nothing matched, default to all document tools
+        if not selected_tools:
+            selected_tools.extend(self.document_tools)
+
+        return selected_tools
+
+    def _intelligent_routing(self, query: str) -> List[Any]:
+        """LLM-based routing with fallback to simple rules"""
+        if self.llm is None:
+            return self._simple_routing(query)
+
+        tools = self.document_tools + self.function_tools
+        if not tools:
+            return []
+
+        tool_descriptions = []
+        for idx, tool in enumerate(tools, start=1):
+            name = tool.metadata.name if hasattr(tool, 'metadata') else f"tool_{idx}"
+            desc = tool.metadata.description if hasattr(tool, 'metadata') else ''
+            tool_descriptions.append(f"{idx}. {name}: {desc}")
+
+        prompt = (
+            "You are a routing assistant. Select the tool numbers needed to answer the query.
+"
+            "Return a comma-separated list of tool numbers only.
+"
+            f"\nQuery: {query}\n"
+            f"\nTools:\n" + "
+".join(tool_descriptions)
+        )
+
+        try:
+            response = self.llm.complete(prompt)
+            text = response.text.strip()
+            indices = [int(x) for x in re.findall(r"\d+", text)]
+            selected = []
+            for idx in indices:
+                if 1 <= idx <= len(tools):
+                    selected.append(tools[idx - 1])
+            return selected or self._simple_routing(query)
+        except Exception:
+            return self._simple_routing(query)
+
+    def _synthesize_results(self, question: str, results: List[Dict[str, Any]]) -> str:
+        """Synthesize multiple tool results into a single response"""
+        if self.llm is None:
+            lines = [f"{item['tool']}: {item['result']}" for item in results]
+            return "
+".join(lines)
+
+        context = "
+".join([f"Tool {item['tool']}: {item['result']}" for item in results])
+        prompt = (
+            "You are a financial analyst. Provide a concise, well-structured answer based on the tool outputs.
+"
+            f"\nQuestion: {question}\n"
+            f"\nTool Outputs:\n{context}\n"
+        )
+        response = self.llm.complete(prompt)
+        return response.text.strip()
+
+def _route_query(self, query: str) -> List[Tuple[str, str, Any]]:
         """Use LLM to intelligently route query to appropriate tools
         
         This method analyzes the user's query and determines which tools are needed
@@ -223,16 +344,27 @@ class AgentCoordinator:
             List of tuples: (tool_name, tool_description, result)
         """
         
-        # TODO: Build routing logic
-        # 1. Create descriptions of all available tools
-        # 2. Build LLM prompt with query and tool options
-        # 3. Include routing guidelines (database for customers, market for prices, etc.)
-        # 4. Parse LLM response to get tool indices
-        # 5. Execute selected tools and collect results
-        # 6. Apply PII protection to database results
-        # YOUR CODE HERE
-        
-        return []  # Placeholder
+        # Build routing logic
+        tools = self._intelligent_routing(query)
+        if not tools:
+            tools = self._simple_routing(query)
+
+        results = []
+        for tool in tools:
+            tool_name = tool.metadata.name if hasattr(tool, 'metadata') else 'unknown_tool'
+            tool_desc = tool.metadata.description if hasattr(tool, 'metadata') else ''
+            try:
+                if hasattr(tool, 'query_engine'):
+                    tool_result = tool.query_engine.query(query)
+                else:
+                    tool_result = tool.call(query)
+                result_str = str(tool_result)
+                result_str = self._check_and_apply_pii_protection(tool_name, result_str)
+                results.append((tool_name, tool_desc, result_str))
+            except Exception as e:
+                results.append((tool_name, tool_desc, f"Tool error: {e}"))
+
+        return results
     
     def query(self, question: str, verbose: bool = None) -> str:
         """Process query with dynamic tool routing and result synthesis
@@ -263,17 +395,33 @@ class AgentCoordinator:
         if verbose:
             print(f"🎯 Query: {question}")
         
-        # TODO: Implement query processing workflow
-        # 1. Route query to appropriate tools using _route_query()
-        # 2. Display tool selection info if verbose
-        # 3. If single tool result, return it directly
-        # 4. If multiple tool results, synthesize using LLM
-        # 5. Return comprehensive answer
-        # YOUR CODE HERE
-        
-        return "Query method not implemented yet - complete the YOUR CODE HERE sections"
+        # Implement query processing workflow
+        results = self._route_query(question)
+        if not results:
+            return "No relevant tools available to answer the query."
+
+        if verbose:
+            for tool_name, _, _ in results:
+                print(f"   🔧 Used tool: {tool_name}")
+
+        if len(results) == 1:
+            return results[0][2]
+
+        synthesis_inputs = [
+            {"tool": tool_name, "result": result}
+            for tool_name, _, result in results
+        ]
+        return self._synthesize_results(question, synthesis_inputs)
     
-    def get_available_tools(self) -> Dict[str, Any]:
+        def list_available_tools(self) -> List[str]:
+        """Return a flat list of available tool names"""
+        tools = []
+        for tool in self.document_tools + self.function_tools:
+            if hasattr(tool, 'metadata'):
+                tools.append(tool.metadata.name)
+        return tools
+
+def get_available_tools(self) -> Dict[str, Any]:
         """
         Get information about available tools with full compatibility.
         

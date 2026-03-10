@@ -21,6 +21,7 @@ Key Concepts:
 """
 
 import logging
+import os
 from pathlib import Path
 from typing import List
 
@@ -86,9 +87,10 @@ class DocumentToolsManager:
         
         Hint: All necessary imports are already provided at the top of this file.
         """
-        # YOUR CODE HERE
-        pass
-    
+        api_base = os.getenv("OPENAI_API_BASE", "https://openai.vocareum.com/v1")
+        Settings.llm = OpenAI(model="gpt-3.5-turbo", temperature=0, api_base=api_base)
+        Settings.embed_model = OpenAIEmbedding(model="text-embedding-ada-002", api_base=api_base)
+
     def build_document_tools(self):
         """Build document query engines for each company
         
@@ -104,8 +106,8 @@ class DocumentToolsManager:
         # Clear existing tools first to avoid duplicates
         self.document_tools = []
         
-        # TODO: Create a text splitter for chunking documents
-        # YOUR CODE HERE
+        # Create a text splitter for chunking documents
+        splitter = SentenceSplitter(chunk_size=1024, chunk_overlap=200)
         
         for company in self.companies:
             # Determine company name for tool description
@@ -126,15 +128,40 @@ class DocumentToolsManager:
                 continue
             
             try:
-                # TODO: Implement document processing pipeline
-                # YOUR CODE HERE
-                # - Load the PDF document
-                # - Split into chunks/nodes
-                # - Add metadata (company info, document type)
-                # - Build vector index
-                # - Create query engine
-                # - Wrap in QueryEngineTool with descriptive name and description
-                
+                # Load the PDF document
+                documents = SimpleDirectoryReader(input_files=[str(pdf_path)]).load_data()
+
+                # Split into chunks/nodes
+                nodes = splitter.get_nodes_from_documents(documents)
+
+                # Add metadata
+                for node in nodes:
+                    node.metadata.update({
+                        "company": company,
+                        "company_name": self.company_info[company]["name"],
+                        "sector": self.company_info[company]["sector"],
+                        "document_type": "10-K",
+                        "source": str(pdf_path),
+                    })
+
+                # Build vector index
+                index = VectorStoreIndex(nodes)
+
+                # Create query engine
+                query_engine = index.as_query_engine(similarity_top_k=4)
+
+                # Wrap in QueryEngineTool
+                description = (
+                    f"Search {self.company_info[company]['name']} 2024 10-K filing for business, risks, "
+                    f"financials, and key disclosures. Use for company-specific SEC filing questions."
+                )
+                tool = QueryEngineTool.from_defaults(
+                    query_engine=query_engine,
+                    name=tool_name,
+                    description=description,
+                )
+                self.document_tools.append(tool)
+
                 if self.verbose:
                     print(f"   ✅ {company} tool created: {tool_name}")
                     
