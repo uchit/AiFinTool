@@ -24,6 +24,10 @@ import os
 import sys
 from pathlib import Path
 
+# Ensure API key exists for tests (use dummy for local runs)
+if not os.getenv('OPENAI_API_KEY'):
+    os.environ['OPENAI_API_KEY'] = 'DUMMY_KEY'
+
 # Add the project root to the Python path
 current_dir = Path(__file__).parent
 project_root = current_dir.parent
@@ -472,10 +476,6 @@ def main():
 if __name__ == "__main__":
     main()
 
-Usage:
-    python -m pytest tests/test_function_tools.py -v
-    python -m pytest tests/test_function_tools.py::test_initialization -v
-"""
 
 import pytest
 import os
@@ -527,7 +527,7 @@ class TestFunctionTools:
                 elif package == 'yfinance':
                     import yfinance as yf
                 elif 'llama_index' in package:
-                    exec(f"from {package} import *")
+                    __import__(package)
             except ImportError:
                 missing_packages.append(package)
         
@@ -678,23 +678,34 @@ class TestFunctionTools:
             from function_tools import FunctionToolsManager
             manager = FunctionToolsManager(verbose=False)
             
-            # Test database query method
-            test_query = "How many customers do we have?"
-            result = manager.database_query_tool(test_query)
-            
-            assert isinstance(result, str), "Database query should return a string"
-            
-            if "not implemented" in result.lower():
-                print("⚠️  Database query tool not implemented yet")
-                print("💡 HINT: Complete the database_query_tool() method")
-                print("💡 HINT: Use LLM to generate SQL from natural language")
-                print("💡 HINT: Execute SQL against SQLite database")
-                print("💡 HINT: Format results as string with column information")
-                return
-            
-            print(f"✅ Database query executed successfully")
-            print(f"📋 Query: {test_query}")
-            print(f"📋 Result preview: {result[:100]}...")
+            # Test multiple query patterns (aggregation, join, filtering)
+            test_queries = [
+                "How many customers do we have?",
+                "Show customers who own Tesla stock and their share counts.",
+                "Total current_value by symbol for all holdings.",
+            ]
+
+            for test_query in test_queries:
+                result = manager.database_query_tool(test_query)
+                assert isinstance(result, str), "Database query should return a string"
+
+                if "not implemented" in result.lower():
+                    print("⚠️  Database query tool not implemented yet")
+                    print("💡 HINT: Complete the database_query_tool() method")
+                    print("💡 HINT: Use LLM to generate SQL from natural language")
+                    print("💡 HINT: Execute SQL against SQLite database")
+                    print("💡 HINT: Format results as string with column information")
+                    return
+
+                if "error" in result.lower():
+                    pytest.fail(f"Database query error for '{test_query}': {result[:120]}...")
+
+                if "COLUMNS:" not in result:
+                    pytest.fail("Database result missing column metadata (COLUMNS:)")
+
+                print(f"✅ Database query executed successfully")
+                print(f"📋 Query: {test_query}")
+                print(f"📋 Result preview: {result[:100]}...")
             
         except Exception as e:
             print(f"❌ Database query error: {e}")

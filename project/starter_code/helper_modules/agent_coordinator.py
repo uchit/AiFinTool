@@ -112,6 +112,11 @@ class AgentCoordinator:
         Pass it as api_base parameter to both OpenAI() and OpenAIEmbedding() constructors.
         """
         api_base = os.getenv("OPENAI_API_BASE", "https://openai.vocareum.com/v1")
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            os.environ["OPENAI_API_KEY"] = "DUMMY_KEY"
+            api_key = "DUMMY_KEY"
+        self._llm_available = api_key not in {"DUMMY_KEY", "dummy", "dummy_key"}
         self.llm = OpenAI(model="gpt-3.5-turbo", temperature=0, api_base=api_base)
         Settings.llm = self.llm
         Settings.embed_model = OpenAIEmbedding(model="text-embedding-ada-002", api_base=api_base)
@@ -242,8 +247,7 @@ class AgentCoordinator:
                 pii_fields.add(field)
         return pii_fields
     
-
-        def _simple_routing(self, query: str) -> List[Any]:
+    def _simple_routing(self, query: str) -> List[Any]:
         """Rule-based routing fallback when LLM routing is unavailable"""
         query_lower = query.lower()
         selected_tools = []
@@ -278,7 +282,7 @@ class AgentCoordinator:
 
     def _intelligent_routing(self, query: str) -> List[Any]:
         """LLM-based routing with fallback to simple rules"""
-        if self.llm is None:
+        if self.llm is None or not self._llm_available:
             return self._simple_routing(query)
 
         tools = self.document_tools + self.function_tools
@@ -292,13 +296,15 @@ class AgentCoordinator:
             tool_descriptions.append(f"{idx}. {name}: {desc}")
 
         prompt = (
-            "You are a routing assistant. Select the tool numbers needed to answer the query.
-"
-            "Return a comma-separated list of tool numbers only.
-"
+            "You are a routing assistant. Select the tool numbers needed to answer the query.\n"
+            "Guidelines:\n"
+            "- Customer/portfolio/account/holdings questions -> database_query_tool\n"
+            "- Stock price/market/volume/market cap questions -> finance_market_search_tool\n"
+            "- Company-specific SEC 10-K questions -> the matching company 10-K tool\n"
+            "- If a query needs both company filings and customer data, select multiple tools\n"
+            "Return a comma-separated list of tool numbers only.\n"
             f"\nQuery: {query}\n"
-            f"\nTools:\n" + "
-".join(tool_descriptions)
+            f"\nTools:\n" + "\n".join(tool_descriptions)
         )
 
         try:
@@ -315,23 +321,23 @@ class AgentCoordinator:
 
     def _synthesize_results(self, question: str, results: List[Dict[str, Any]]) -> str:
         """Synthesize multiple tool results into a single response"""
-        if self.llm is None:
+        if self.llm is None or not self._llm_available:
             lines = [f"{item['tool']}: {item['result']}" for item in results]
-            return "
-".join(lines)
+            return "\n".join(lines)
 
-        context = "
-".join([f"Tool {item['tool']}: {item['result']}" for item in results])
+        context = "\n".join([f"Tool {item['tool']}: {item['result']}" for item in results])
         prompt = (
-            "You are a financial analyst. Provide a concise, well-structured answer based on the tool outputs.
-"
+            "You are a financial analyst. Provide a concise, well-structured answer that integrates\n"
+            "all relevant tool outputs into a single coherent response. Resolve overlaps, cite which\n"
+            "tool provided which facts, and clearly combine document analysis with database and market data\n"
+            "when both are present.\n"
             f"\nQuestion: {question}\n"
             f"\nTool Outputs:\n{context}\n"
         )
         response = self.llm.complete(prompt)
         return response.text.strip()
 
-def _route_query(self, query: str) -> List[Tuple[str, str, Any]]:
+    def _route_query(self, query: str) -> List[Tuple[str, str, Any]]:
         """Use LLM to intelligently route query to appropriate tools
         
         This method analyzes the user's query and determines which tools are needed
@@ -413,7 +419,7 @@ def _route_query(self, query: str) -> List[Tuple[str, str, Any]]:
         ]
         return self._synthesize_results(question, synthesis_inputs)
     
-        def list_available_tools(self) -> List[str]:
+    def list_available_tools(self) -> List[str]:
         """Return a flat list of available tool names"""
         tools = []
         for tool in self.document_tools + self.function_tools:
@@ -421,7 +427,7 @@ def _route_query(self, query: str) -> List[Tuple[str, str, Any]]:
                 tools.append(tool.metadata.name)
         return tools
 
-def get_available_tools(self) -> Dict[str, Any]:
+    def get_available_tools(self) -> Dict[str, Any]:
         """
         Get information about available tools with full compatibility.
         

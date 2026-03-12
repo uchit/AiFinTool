@@ -24,6 +24,10 @@ import os
 import sys
 from pathlib import Path
 
+# Ensure API key exists for tests (use dummy for local runs)
+if not os.getenv('OPENAI_API_KEY'):
+    os.environ['OPENAI_API_KEY'] = 'DUMMY_KEY'
+
 # Add the project root to the Python path
 current_dir = Path(__file__).parent
 project_root = current_dir.parent
